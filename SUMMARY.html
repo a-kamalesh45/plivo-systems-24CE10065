@@ -801,7 +801,7 @@ sequence × frame_period
 
     <p>
 
-        Each transmitted packet carries a 64-bit microsecond timestamp representing its generation time. When an ACK returns, the sender subtracts this timestamp from the current time to estimate the packet round-trip time (RTT). A Smoothed RTT (SRTT) is then maintained using an exponentially weighted moving average.
+        Each transmitted packet carries its generation timestamp.
 
         When an ACK returns, the sender measures the elapsed interval and updates a
         Smoothed Round Trip Time (SRTT).

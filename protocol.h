@@ -16,13 +16,13 @@ struct TransportHeader {
     PktType type;         // 1 byte  - Traffic Type
     uint32_t seq;         // 4 bytes - Primary Sequence Number (Big-Endian)
     uint32_t block_base;  // 4 bytes - FEC Group ID, or NACK/ACK target (Big-Endian)
-    uint64_t timestamp;   // 8 bytes - Generation time for SRTT calculation
+    uint64_t timestamp;     // 8 bytes - Generation time for SRTT calculation
 };
 #pragma pack(pop)
 
 // High-precision clock for playout deadlines and telemetry
-inline uint64_t current_time_us() {
-    return std::chrono::duration_cast<std::chrono::microseconds>(
+inline uint64_t current_time_s() {
+    return std::chrono::duration_cast<std::chrono::milliseconds>(
         std::chrono::system_clock::now().time_since_epoch()
     ).count();
 }
