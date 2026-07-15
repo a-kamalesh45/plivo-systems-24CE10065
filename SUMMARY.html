@@ -1,0 +1,1169 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <title>Hybrid Reliable Transport Protocol — Architecture Summary</title>
+
+    <style>
+        :root {
+            --bg: #f7f7f5;
+            --paper: #ffffff;
+            --border: #d9dde3;
+            --accent: #a23b24;
+            --text: #202124;
+            --muted: #61656c;
+            --code: #f3f4f6;
+        }
+
+        body {
+            background: var(--bg);
+            color: var(--text);
+            font-family: Georgia, "Times New Roman", serif;
+            max-width: 900px;
+            margin: auto;
+            padding: 48px;
+            line-height: 1.7;
+        }
+
+        h1 {
+            font-size: 2.1rem;
+            margin-bottom: 4px;
+        }
+
+        .subtitle {
+            color: var(--muted);
+            margin-bottom: 36px;
+        }
+
+        h2 {
+            margin-top: 48px;
+            padding-bottom: 8px;
+            border-bottom: 1px solid var(--border);
+        }
+
+        h3 {
+            color: var(--accent);
+            margin-top: 32px;
+        }
+
+        pre {
+            background: var(--code);
+            padding: 16px;
+            border-radius: 6px;
+            border: 1px solid var(--border);
+            overflow-x: auto;
+            font-family: Consolas, monospace;
+            font-size: 0.84rem;
+        }
+
+        code {
+            background: var(--code);
+            padding: 2px 5px;
+            border-radius: 4px;
+        }
+
+        table {
+            width: 100%;
+            border-collapse: collapse;
+            margin-top: 18px;
+            margin-bottom: 24px;
+        }
+
+        th,
+        td {
+            border: 1px solid var(--border);
+            padding: 10px;
+        }
+
+        th {
+            background: #efefef;
+        }
+
+        .diagram {
+            font-family: Consolas, monospace;
+            background: var(--code);
+            border: 1px solid var(--border);
+            border-radius: 6px;
+            padding: 18px;
+            white-space: pre;
+            overflow-x: auto;
+        }
+
+        .note {
+            border-left: 4px solid var(--accent);
+            background: #fff3ef;
+            padding: 14px 18px;
+            margin: 24px 0;
+        }
+
+        footer {
+            margin-top: 70px;
+            color: gray;
+            border-top: 1px solid var(--border);
+            padding-top: 20px;
+        }
+    </style>
+
+</head>
+
+<body>
+
+    <h1>Hybrid Reliable Transport Protocol</h1>
+
+    <div class="subtitle">
+        Architecture Summary • Systems Assignment
+    </div>
+
+    <h2>1. Overview</h2>
+
+    <p>
+
+        The objective of this assignment was to design a lightweight transport
+        protocol capable of reliably delivering real-time media across an unreliable
+        UDP network while satisfying two constraints imposed by the grading harness:
+
+    </p>
+
+    <ul>
+
+        <li>Deadline misses must remain below <b>1%</b>.</li>
+
+        <li>Total bandwidth overhead must remain below <b>2×</b>.</li>
+
+    </ul>
+
+    <p>
+
+        The supplied relay intentionally introduces packet loss, packet duplication,
+        variable network delay and packet reordering.
+        The baseline implementation forwarded every frame exactly once, meaning
+        every dropped or excessively delayed packet permanently contributed to the
+        deadline miss rate.
+
+    </p>
+
+    <p>
+
+        The final solution therefore combines multiple complementary reliability
+        mechanisms rather than relying on a single technique. Forward Error
+        Correction (FEC) provides immediate recovery for isolated packet loss,
+        receiver-driven retransmissions recover packets that parity cannot restore,
+        while a receiver-side jitter buffer absorbs network delay variation before
+        playback.
+
+    </p>
+
+    <div class="note">
+
+        Rather than choosing between proactive redundancy or reactive recovery,
+        the protocol combines both approaches. Most packet losses are corrected
+        immediately using parity, while retransmissions are reserved only for
+        losses that remain unrecoverable after FEC processing.
+
+    </div>
+
+    <h2>2. System Architecture</h2>
+
+    <div class="diagram">
+
+        Harness Source
+        │
+        │ UDP :47010
+        ▼
+        +----------------+
+        | Sender |
+        +----------------+
+        │
+        │ UDP :47001
+        ▼
+        =========================
+        Hostile Relay
+        =========================
+        Loss
+        Delay
+        Duplication
+        Reordering
+        =========================
+        │
+        │ UDP :47002
+        ▼
+        +----------------+
+        | Receiver |
+        +----------------+
+        │
+        │ UDP :47020
+        ▼
+        Harness Player
+
+        Feedback Path
+
+        Receiver
+        │
+        ▼
+        UDP :47003
+
+        Relay
+
+        UDP :47004
+
+        Sender
+
+        ACK + NACK
+
+    </div>
+
+    <p>
+
+        The sender receives original media frames directly from the harness,
+        encapsulates them inside a custom transport protocol and transmits them
+        towards the relay.
+
+        The relay represents the unreliable network and is responsible for
+        simulating realistic transport impairments.
+
+        The receiver reconstructs missing packets whenever possible, buffers
+        incoming packets to compensate for network jitter, performs deadline-aware
+        playback scheduling and finally forwards reconstructed media frames back
+        to the harness player.
+
+    </p>
+
+    <h2>3. Protocol Design</h2>
+
+    <p>
+
+        Instead of transmitting raw harness packets directly across the unreliable
+        network, every outgoing packet is wrapped inside a small transport header.
+
+        The protocol distinguishes different traffic classes so that media,
+        parity and feedback packets can be processed independently without
+        ambiguity.
+
+    </p>
+
+    <h3>Transport Header</h3>
+
+    <pre>
+struct TransportHeader
+{
+    PacketType type;
+
+    uint32_t sequence;
+
+    uint32_t block_base;
+
+    uint64_t timestamp;
+};
+</pre>
+
+    <table>
+
+        <tr>
+
+            <th>Field</th>
+
+            <th>Description</th>
+
+        </tr>
+
+        <tr>
+
+            <td>Packet Type</td>
+
+            <td>
+
+                Identifies MEDIA, FEC, ACK or NACK packets.
+
+            </td>
+
+        </tr>
+
+        <tr>
+
+            <td>Sequence Number</td>
+
+            <td>
+
+                Unique identifier for every media frame.
+
+            </td>
+
+        </tr>
+
+        <tr>
+
+            <td>Block Base</td>
+
+            <td>
+
+                Identifies the parity block or retransmission target.
+
+            </td>
+
+        </tr>
+
+        <tr>
+
+            <td>Timestamp</td>
+
+            <td>
+
+                Generation timestamp used for round-trip time estimation.
+
+            </td>
+
+        </tr>
+
+    </table>
+
+    <p>
+
+        Separating packet type from packet sequence significantly simplifies
+        receiver logic compared to embedding flags directly inside the sequence
+        number. The protocol remains compact while being considerably easier to
+        extend with future control messages.
+
+    </p>
+
+    <h2>4. Overall Protocol Workflow</h2>
+
+    <div class="diagram">
+
+        Harness
+
+        ↓
+
+        Sender
+
+        ↓
+
+        Generate Media Packet
+
+        ↓
+
+        Transmit Media
+
+        ↓
+
+        Generate XOR Parity
+
+        ↓
+
+        Transmit Parity
+
+        ↓
+
+        Hostile Relay
+
+        ↓
+
+        Receiver
+
+        ↓
+
+        Store Packet
+
+        ↓
+
+        Attempt FEC Recovery
+
+        ↓
+
+        Generate ACK / NACK
+
+        ↓
+
+        Jitter Buffer
+
+        ↓
+
+        Deadline Scheduler
+
+        ↓
+
+        Harness Player
+
+    </div>
+
+    <p>
+
+        Every media frame therefore has two independent opportunities to survive
+        network impairment.
+
+        If parity alone is sufficient, recovery happens immediately without any
+        additional network traffic.
+
+        If parity cannot recover the frame, the receiver requests a selective
+        retransmission using a NACK packet.
+
+        ACK packets simultaneously allow the sender to reclaim obsolete state,
+        keeping memory usage bounded throughout execution.
+
+    </p>
+
+    <!-- PART 1 ENDS HERE -->
+    <h2>5. Sender Architecture</h2>
+
+    <p>
+
+        The sender is responsible for converting the raw media stream generated by
+        the harness into a resilient transport stream capable of surviving packet
+        loss and moderate network jitter.
+
+        Rather than transmitting packets blindly, the sender maintains a bounded
+        history of recently transmitted media frames. This history enables selective
+        retransmission whenever the receiver detects an unrecoverable packet loss.
+
+    </p>
+
+    <div class="diagram">
+
+        Harness Frame
+
+        ↓
+
+        Read Sequence Number
+
+        ↓
+
+        Store in Sliding History
+
+        ↓
+
+        Build MEDIA Packet
+
+        ↓
+
+        Transmit
+
+        ↓
+
+        Generate XOR Parity
+
+        ↓
+
+        Transmit FEC Packet
+
+        ↓
+
+        Wait for ACK / NACK
+
+        ↓
+
+        Garbage Collection
+
+    </div>
+
+    <h3>Sliding History</h3>
+
+    <p>
+
+        Every transmitted media frame is temporarily stored inside a sender-side
+        history indexed by sequence number.
+
+        This history serves two purposes.
+
+    </p>
+
+    <ul>
+
+        <li>Selective retransmission after a receiver NACK.</li>
+
+        <li>Memory-efficient cleanup after ACK reception.</li>
+
+    </ul>
+
+    <p>
+
+        Unlike an unbounded packet cache, acknowledged packets are periodically
+        removed from memory. This guarantees constant memory usage even during long
+        executions.
+
+    </p>
+
+    <h3>Forward Error Correction</h3>
+
+    <p>
+
+        For every pair of media packets, the sender generates one XOR parity packet.
+
+    </p>
+
+    <pre>
+
+Packet A
+
+Packet B
+
+↓
+
+Parity = A XOR B
+
+</pre>
+
+    <p>
+
+        If exactly one packet from the pair is lost during transmission, the receiver
+        can reconstruct the missing payload using the surviving media packet together
+        with the parity packet.
+
+    </p>
+
+    <pre>
+
+Recovered
+
+=
+
+Parity XOR Received Packet
+
+</pre>
+
+    <p>
+
+        This recovery requires no interaction with the sender and therefore incurs
+        no additional network latency.
+
+    </p>
+
+    <h3>Selective Retransmission</h3>
+
+    <p>
+
+        Whenever the receiver determines that parity recovery is impossible, it
+        transmits a NACK containing the missing sequence number.
+
+        The sender consults its sliding history and retransmits only the requested
+        frame rather than repeating the entire stream.
+
+        Selective retransmission minimizes bandwidth while still recovering packets
+        that exceed the capability of XOR parity.
+
+    </p>
+
+    <hr>
+
+    <h2>6. Receiver Architecture</h2>
+
+    <p>
+
+        The receiver performs substantially more work than the sender.
+
+        Its responsibilities include packet reordering, parity reconstruction,
+        deadline-aware playback scheduling, ACK generation, NACK generation,
+        round-trip telemetry and memory management.
+
+    </p>
+
+    <div class="diagram">
+
+        Receive Packet
+
+        ↓
+
+        Packet Classification
+
+        ↓
+
+        MEDIA ?
+
+        ↓
+
+        Store
+
+        ↓
+
+        Attempt Recovery
+
+        ↓
+
+        Generate ACK
+
+        ↓
+
+        Generate NACK (if needed)
+
+        ↓
+
+        Jitter Buffer
+
+        ↓
+
+        Deadline Scheduler
+
+        ↓
+
+        Player
+
+    </div>
+
+    <h3>Packet Classification</h3>
+
+    <p>
+
+        Incoming packets are immediately classified according to the transport
+        header.
+
+    </p>
+
+    <table>
+
+        <tr>
+
+            <th>Packet Type</th>
+
+            <th>Purpose</th>
+
+        </tr>
+
+        <tr>
+
+            <td>MEDIA</td>
+
+            <td>Original media frame.</td>
+
+        </tr>
+
+        <tr>
+
+            <td>FEC</td>
+
+            <td>XOR parity block.</td>
+
+        </tr>
+
+        <tr>
+
+            <td>ACK</td>
+
+            <td>Confirms successful reception.</td>
+
+        </tr>
+
+        <tr>
+
+            <td>NACK</td>
+
+            <td>Requests retransmission.</td>
+
+        </tr>
+
+    </table>
+
+    <p>
+
+        Separating packet processing by packet type keeps the receiver logic simple
+        and avoids ambiguity during recovery.
+
+    </p>
+
+    <hr>
+
+    <h2>7. Jitter Buffer</h2>
+
+    <p>
+
+        Network delay varies significantly between packets.
+
+        Forwarding every packet immediately would cause many frames to miss their
+        playback deadline simply because they arrived slightly later than neighboring
+        frames.
+
+        To mitigate this problem, the receiver maintains a small jitter buffer.
+
+        Packets are temporarily stored according to sequence number before playback.
+
+    </p>
+
+    <div class="diagram">
+
+        Packet Arrives
+
+        ↓
+
+        Store in Buffer
+
+        ↓
+
+        Wait Until Playback Time
+
+        ↓
+
+        Packet Available?
+
+        ↓
+
+        YES → Play
+
+        ↓
+
+        NO
+
+        ↓
+
+        Attempt Recovery
+
+        ↓
+
+        Still Missing?
+
+        ↓
+
+        Skip
+
+    </div>
+
+    <p>
+
+        The playout scheduler continuously compares the current wall-clock time
+        against the expected playback time derived from
+
+    </p>
+
+    <pre>
+
+T0
+
++
+
+delay_ms
+
++
+
+sequence × frame_period
+
+</pre>
+
+    <p>
+
+        If a packet cannot be recovered before its deadline, playback advances to the
+        next sequence rather than delaying the remainder of the stream.
+
+        This prevents a single missing packet from causing cascading deadline misses.
+
+    </p>
+
+    <hr>
+
+    <h2>8. ACK / NACK Feedback Protocol</h2>
+
+    <p>
+
+        Although Forward Error Correction successfully reconstructs most isolated
+        packet losses, parity alone cannot recover every failure.
+
+        The receiver therefore employs a lightweight feedback mechanism.
+
+    </p>
+
+    <h3>ACK</h3>
+
+    <p>
+
+        ACK packets periodically confirm successful delivery.
+
+        The sender uses ACK information to:
+
+    </p>
+
+    <ul>
+
+        <li>Estimate round-trip time.</li>
+
+        <li>Remove obsolete packets from history.</li>
+
+        <li>Prevent unnecessary retransmissions.</li>
+
+    </ul>
+
+    <h3>NACK</h3>
+
+    <p>
+
+        Whenever a packet remains unavailable after parity recovery, the receiver
+        issues a selective NACK.
+
+        Only the missing sequence number is requested.
+
+        To avoid excessive feedback traffic, NACK transmission is rate limited.
+
+        Repeated requests for the same packet cannot occur more frequently than the
+        configured cooldown interval.
+
+        This prevents feedback storms during heavy packet loss.
+
+    </p>
+
+    <hr>
+
+    <h2>9. Round Trip Time Estimation</h2>
+
+    <p>
+
+        Each transmitted packet carries a 64-bit microsecond timestamp representing its generation time. When an ACK returns, the sender subtracts this timestamp from the current time to estimate the packet round-trip time (RTT). A Smoothed RTT (SRTT) is then maintained using an exponentially weighted moving average.
+
+        When an ACK returns, the sender measures the elapsed interval and updates a
+        Smoothed Round Trip Time (SRTT).
+
+    </p>
+
+    <pre>
+
+SRTT
+
+=
+
+0.875 × Previous SRTT
+
++
+
+0.125 × Latest RTT
+
+</pre>
+
+    <p>
+
+        Although retransmissions remain receiver-driven, maintaining SRTT provides
+        valuable protocol telemetry and establishes the foundation for future
+        adaptive timeout algorithms.
+
+    </p>
+
+    <hr>
+
+    <h2>10. Memory Management</h2>
+
+    <p>
+
+        Long-running streams continually generate new protocol state.
+
+        Without cleanup, sender history, parity blocks and jitter buffers would grow
+        without bound.
+
+        Both sender and receiver therefore perform periodic garbage collection.
+
+    </p>
+
+    <ul>
+
+        <li>Sender removes packets acknowledged by the receiver.</li>
+
+        <li>Receiver removes packets that have already been played.</li>
+
+        <li>Parity blocks are discarded once no longer useful.</li>
+
+        <li>Expired NACK tracking entries are reclaimed.</li>
+
+    </ul>
+
+    <p>
+
+        This guarantees stable memory consumption regardless of stream duration.
+
+    </p>
+
+    <!-- PART 2 ENDS HERE -->
+    <h2>11. Experimental Evaluation</h2>
+
+    <p>
+
+        After the protocol architecture was finalized, the remaining work focused on
+        determining the minimum playback delay that consistently satisfied the
+        assignment constraints. Multiple experiments were conducted by varying the
+        receiver playout delay while keeping the protocol unchanged.
+
+        The objective was to minimize latency while maintaining less than 1%
+        deadline misses and less than 2× bandwidth overhead.
+
+    </p>
+
+    <h3>Profile A (profiles/A.json)</h3>
+
+    <table>
+
+        <tr>
+            <th>delay_ms</th>
+            <th>Miss Rate</th>
+            <th>Bandwidth</th>
+            <th>Status</th>
+        </tr>
+
+        <tr>
+            <td>40</td>
+            <td>4.20–4.60%</td>
+            <td>1.76×</td>
+            <td>Invalid</td>
+        </tr>
+
+        <tr>
+            <td>41</td>
+            <td>1.67%</td>
+            <td>1.76×</td>
+            <td>Invalid</td>
+        </tr>
+
+        <tr>
+            <td>42</td>
+            <td>0.87%</td>
+            <td>1.76×</td>
+            <td>Valid</td>
+        </tr>
+
+        <tr>
+            <td><b>44</b></td>
+            <td><b>0.80%</b></td>
+            <td><b>1.76×</b></td>
+            <td><b>Selected</b></td>
+        </tr>
+
+        <tr>
+            <td>48</td>
+            <td>0.87%</td>
+            <td>1.76×</td>
+            <td>Valid</td>
+        </tr>
+
+    </table>
+
+    <p>
+
+        The protocol transitions from invalid to valid between 41&nbsp;ms and
+        42&nbsp;ms. Although 42&nbsp;ms was observed to satisfy the grading
+        constraints, 44&nbsp;ms was selected for the final submission to provide a
+        small safety margin against run-to-run randomness while maintaining very low
+        latency.
+
+    </p>
+
+    <hr>
+
+    <h3>Profile B (profiles/B.json)</h3>
+
+    <table>
+
+        <tr>
+            <th>delay_ms</th>
+            <th>Miss Rate</th>
+            <th>Bandwidth</th>
+            <th>Status</th>
+        </tr>
+
+        <tr>
+            <td>80</td>
+            <td>2.80%</td>
+            <td>1.92×</td>
+            <td>Invalid</td>
+        </tr>
+
+        <tr>
+            <td>90</td>
+            <td>1.53–1.60%</td>
+            <td>1.93–1.94×</td>
+            <td>Invalid</td>
+        </tr>
+
+        <tr>
+            <td>92</td>
+            <td>1.07%</td>
+            <td>1.92×</td>
+            <td>Invalid</td>
+        </tr>
+
+        <tr>
+            <td>93</td>
+            <td>1.40%</td>
+            <td>1.93×</td>
+            <td>Invalid</td>
+        </tr>
+
+        <tr>
+            <td>94</td>
+            <td>0.87%</td>
+            <td>1.92×</td>
+            <td>Valid</td>
+        </tr>
+
+        <tr>
+            <td><b>96</b></td>
+            <td><b>0.93%</b></td>
+            <td><b>1.93×</b></td>
+            <td><b>Selected</b></td>
+        </tr>
+
+        <tr>
+            <td>100</td>
+            <td>0.93%</td>
+            <td>1.94×</td>
+            <td>Valid</td>
+        </tr>
+
+    </table>
+
+    <p>
+
+        Profile B represents a considerably more challenging network due to heavier
+        packet loss and increased delay variation. The protocol first became valid at
+        94&nbsp;ms; however, 96&nbsp;ms was chosen as the recommended grading delay
+        to provide additional robustness while remaining close to the minimum
+        achievable latency.
+
+    </p>
+
+    <hr>
+
+    <h2>12. Design Trade-offs</h2>
+
+    <p>
+
+        Designing a real-time transport protocol involves balancing latency,
+        reliability and bandwidth. Improving one metric often negatively impacts the
+        others. The final implementation intentionally combines multiple lightweight
+        mechanisms so that no single technique bears the entire burden of recovery.
+
+    </p>
+
+    <table>
+
+        <tr>
+            <th>Design Choice</th>
+            <th>Benefit</th>
+            <th>Trade-off</th>
+        </tr>
+
+        <tr>
+            <td>XOR FEC</td>
+            <td>Immediate recovery of isolated losses without network delay.</td>
+            <td>Cannot recover multiple losses within the same parity group.</td>
+        </tr>
+
+        <tr>
+            <td>Selective NACK</td>
+            <td>Recovers packets that parity cannot restore.</td>
+            <td>Requires an additional network round trip.</td>
+        </tr>
+
+        <tr>
+            <td>ACK Feedback</td>
+            <td>Bounds sender memory and provides RTT telemetry.</td>
+            <td>Small control bandwidth overhead.</td>
+        </tr>
+
+        <tr>
+            <td>Jitter Buffer</td>
+            <td>Absorbs delay variation and packet reordering.</td>
+            <td>Introduces controlled playback latency.</td>
+        </tr>
+
+        <tr>
+            <td>Bounded History</td>
+            <td>Constant memory usage.</td>
+            <td>Very old packets cannot be retransmitted.</td>
+        </tr>
+
+    </table>
+
+    <p>
+
+        The final protocol therefore balances proactive recovery through parity with
+        reactive recovery through selective retransmissions. This hybrid strategy
+        proved more effective than relying exclusively on either approach.
+
+    </p>
+
+    <hr>
+
+    <h2>13. Limitations</h2>
+
+    <p>
+
+        Although the protocol satisfies the assignment objectives, several
+        limitations remain.
+
+    </p>
+
+    <ul>
+
+        <li>XOR parity can recover only one lost packet within each protection group.</li>
+
+        <li>Retransmissions arriving after the playback deadline cannot improve the
+            current frame.</li>
+
+        <li>The jitter buffer uses a fixed playout delay rather than adapting
+            dynamically to changing network conditions.</li>
+
+        <li>RTT measurements are collected for telemetry but are not currently used
+            to adapt retransmission or playout behaviour.</li>
+
+        <li>The protocol is optimized specifically for real-time streaming rather
+            than bulk reliable transfer.</li>
+
+    </ul>
+
+    <p>
+
+        These trade-offs were considered acceptable because the assignment primarily
+        evaluates playback deadline misses and bandwidth overhead rather than perfect
+        reliability.
+
+    </p>
+
+    <hr>
+
+    <h2>14. Possible Future Improvements</h2>
+
+    <ul>
+
+        <li>Adaptive jitter buffer sizing based on measured network jitter.</li>
+
+        <li>Adaptive Forward Error Correction according to observed packet loss.</li>
+
+        <li>Selective ACK bitmaps for reduced control overhead.</li>
+
+        <li>Reed–Solomon or fountain-code based FEC for improved burst-loss
+            recovery.</li>
+
+        <li>Congestion-aware pacing and retransmission scheduling.</li>
+
+        <li>Dynamic retransmission timeout based on measured RTT variance.</li>
+
+    </ul>
+
+    <hr>
+
+    <h2>15. Conclusion</h2>
+
+    <p>
+
+        The final implementation demonstrates that combining lightweight Forward
+        Error Correction with receiver-driven selective retransmissions provides an
+        effective balance between latency and reliability for real-time media
+        transport over an unreliable UDP network.
+
+        Rather than depending exclusively on proactive redundancy or reactive
+        recovery, the protocol exploits the strengths of both approaches while
+        remaining within the assignment's bandwidth constraint.
+
+        Experimental tuning identified grading delays of <b>44&nbsp;ms</b> for
+        <b>profiles/A.json</b> and <b>96&nbsp;ms</b> for
+        <b>profiles/B.json</b>, both of which consistently satisfy the required
+        deadline miss and bandwidth limits.
+
+        The resulting transport protocol provides bounded memory usage, structured
+        packet processing, efficient packet recovery and deterministic playback,
+        forming a clean, modular and extensible architecture suitable for
+        deadline-sensitive streaming applications.
+
+    </p>
+
+    <footer>
+
+        Hybrid Reliable Transport Protocol<br>
+        Systems Assignment Submission<br>
+        Architecture Summary
+
+    </footer>
+
+</body>
+
+</html>
